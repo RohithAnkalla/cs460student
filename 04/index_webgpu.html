@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>Flashy Fish Super Bonus</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <style>
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      overflow: hidden !important;
+      background: url('assets/img/bg.png');
+      background-size: cover;
+      background-position: center center;
+      background-repeat: no-repeat;
+      background-color: #000;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Helvetica Neue", sans-serif;
+    }
+    #c { width: 100%; height: 100%; display:block; background: transparent; }
+
+    #hud {
+      position: fixed; right: 12px; top: 10px; z-index: 5;
+      color: #E1EFFF; font-weight: 700; font-size: 16px; letter-spacing: .4px;
+      text-shadow: 0 0 6px #000, 0 0 10px #000;
+      user-select: none;
+    }
+    #hud span.value { display:inline-block; min-width: 36px; text-align: right; }
+
+    .overlay {
+      position: fixed; inset: 0; z-index: 10;
+      display: grid; place-items: center;
+      background: rgba(0,0,0,0.45);
+      user-select: none;
+    }
+    .panel {
+      position: relative;
+      padding: 16px 22px 20px;
+      border-radius: 16px;
+      background: rgba(10, 12, 18, 0.82);
+      color: #E1EFFF;
+      max-width: min(92vw, 680px);
+      box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+      text-align: center;
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .banner {
+      display:block; width: 100%; height: 84px; margin: -4px 0 10px;
+      background: linear-gradient(135deg, rgba(76,129,255,.35), rgba(0,198,255,.28));
+      border-radius: 12px;
+      position: relative; overflow: hidden;
+    }
+    .banner svg { position:absolute; inset:0; width:100%; height:100%; opacity:.45 }
+    .panel h1 { margin: 10px 0 8px; font-size: 22px; letter-spacing: .5px; }
+    .rules { text-align: left; line-height: 1.45; font-size: 15px; margin: 8px 0 14px; }
+    .rules li { margin: 6px 0; }
+    .play-btn { display:inline-block; cursor:pointer; border:none; background:transparent; padding:0; margin-top:10px; }
+    .play-btn img { width:200px; height:auto; filter: drop-shadow(0 4px 16px rgba(0,0,0,0.45)); }
+    .hidden { display: none !important; }
+    .banner { display: none !important; }
+  </style>
+
+  <!-- ================== FISH ================== -->
+  <script id="fish_vs" type="wgsl">
+    struct VSOut {
+      @builtin(position) pos : vec4<f32>,
+      @location(0) color : vec4<f32>,
+    };
+
+    @vertex
+    fn main(
+      @location(0) a_pos   : vec3<f32>,  // mesh vertex
+      @location(1) i_off   : vec3<f32>,  // per-instance offset
+      @location(2) i_col   : vec4<f32>,  // per-instance color
+      @location(3) i_scale : f32,        // per-instance scale
+      @location(4) i_dir   : f32,        // per-instance direction (+1/-1)
+      @location(5) i_theta : f32         // per-instance wobble rotation
+    ) -> VSOut {
+      let c = cos(i_theta);
+      let s = sin(i_theta);
+      let sx = i_scale * i_dir;
+      let sy = i_scale;
+
+      let local = vec2<f32>(a_pos.x, a_pos.y);
+      let rot = vec2<f32>( sx*c*local.x + sx*s*local.y,
+                          -sy*s*local.x + sy*c*local.y );
+      let world = vec4<f32>(rot.x + i_off.x, rot.y + i_off.y, 0.0, 1.0);
+
+      var out : VSOut;
+      out.pos   = world;
+      out.color = i_col;
+      return out;
+    }
+  </script>
+
+  <script id="fish_fs" type="wgsl">
+    @fragment
+    fn main(@location(0) color : vec4<f32>) -> @location(0) vec4<f32> {
+      return color;
+    }
+  </script>
+
+  <!-- ================== SPRITES ================== -->
+  <script id="sprite_vs" type="wgsl">
+    struct VSOut {
+      @builtin(position) pos : vec4<f32>,
+      @location(0) uv : vec2<f32>,
+      @location(1) alpha : f32,
+    };
+    @vertex
+    fn main(
+      @location(0) a_pos   : vec2<f32>,  // quad [-0.5..0.5]
+      @location(1) a_uv    : vec2<f32>,
+      @location(2) i_off   : vec2<f32>,  // per-instance offset
+      @location(3) i_scale : f32,        // per-instance scale
+      @location(4) i_alpha : f32         // per-instance alpha
+    ) -> VSOut {
+      let p = vec2<f32>(
+        a_pos.x * i_scale + i_off.x,
+        a_pos.y * i_scale + i_off.y
+      );
+      var out : VSOut;
+      out.pos   = vec4<f32>(p, 0.0, 1.0);
+      out.uv    = a_uv;
+      out.alpha = i_alpha;
+      return out;
+    }
+  </script>
+
+  <script id="sprite_fs" type="wgsl">
+    @group(0) @binding(0) var samp : sampler;
+    @group(0) @binding(1) var tex  : texture_2d<f32>;
+    @fragment
+    fn main(@location(0) uv: vec2<f32>, @location(1) alpha: f32) -> @location(0) vec4<f32> {
+      let t = textureSample(tex, samp, uv);
+      return vec4<f32>(t.rgb, t.a * alpha);
+    }
+  </script>
+
+  <!-- ================== EYES ================== -->
+  <script id="eye_vs" type="wgsl">
+    struct VSOut {
+      @builtin(position) pos : vec4<f32>,
+      @location(0) uv : vec2<f32>,
+    };
+    @vertex
+    fn main(
+      @location(0) a_pos   : vec2<f32>,   // quad [-0.5..0.5]
+      @location(1) a_uv    : vec2<f32>,
+      @location(2) i_off   : vec2<f32>,   // per-eye world offset (NDC center)
+      @location(3) i_scale : vec2<f32>    // per-eye scale (x,y) in NDC
+    ) -> VSOut {
+      let p = vec2<f32>(
+        a_pos.x * i_scale.x + i_off.x,
+        a_pos.y * i_scale.y + i_off.y
+      );
+      var out : VSOut;
+      out.pos = vec4<f32>(p, 0.0, 1.0);
+      out.uv  = a_uv;
+      return out;
+    }
+  </script>
+
+  <script id="eye_fs" type="wgsl">
+    @fragment
+    fn main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+      // Soft circular mask centered at (0.5, 0.5) with gentle falloff
+      let d = distance(uv, vec2<f32>(0.5, 0.5));
+      let edge = 1.0 - smoothstep(0.48, 0.50, d);
+      return vec4<f32>(0.0, 0.0, 0.0, 0.38 * edge);
+    }
+  </script>
+</head>
+
+<body>
+  <canvas id="c"></canvas>
+
+  <!-- HUD -->
+  <div id="hud">
+    Points: <span id="score" class="value">0</span> &nbsp;&nbsp; Time: <span id="time" class="value">120</span>
+  </div>
+
+  <!-- START OVERLAY -->
+  <div id="overlay-start" class="overlay hidden">
+    <div class="panel">
+      <div class="banner" aria-hidden="true">
+        <svg viewBox="0 0 100 28" preserveAspectRatio="none">
+          <path d="M0,20 C20,10 30,28 50,18 C70,8 80,26 100,16 L100,28 L0,28 Z" fill="white"/>
+        </svg>
+      </div>
+      <h1>Rules</h1>
+      <ul class="rules">
+        <li>You got <b>120</b> seconds.</li>
+        <li><b>Krabby Patty</b> → <b>+2</b> points.</li>
+        <li><b>Hot sauce</b> → <b>−1</b> point.</li>
+        <li><b>Jellyfishing jelly</b> → <b>+10s</b> time.</li>
+        <li><b>Nasty patty</b> → <b>Game Over</b>.</li>
+        <li>Move the big red fish with <b>WASD / Arrow keys</b>.</li>
+      </ul>
+      <button class="play-btn" id="playBtn" aria-label="Play">
+        <img src="assets/img/play_button.png" alt="Play">
+      </button>
+      <center style="margin-top:6px;"><b>BY ROHITH ANKALLA</b></center>
+    </div>
+  </div>
+
+  <!-- GAME OVER OVERLAY -->
+  <div id="overlay-over" class="overlay hidden">
+    <div class="panel">
+      <img src="assets/img/game_over.png" alt="Game Over" style="max-width: 80%; height:auto; margin-bottom:8px;">
+      <div style="font-size:18px; margin:6px 0 10px;">Your Score: <b class="final-score">0</b></div>
+      <button class="play-btn" id="playAgainBtn" aria-label="Play Again">
+        <img src="assets/img/play_button.png" alt="Play Again">
+      </button>
+    </div>
+  </div>
+
+  <!-- Background music -->
+  <audio id="bgm" src="assets/audio/bg_loop.m4a" loop preload="auto"></audio>
+
+  <!-- Game / WebGPU -->
+  <script type="module" src="./webgpu.js"></script>
+</body>
+</html>

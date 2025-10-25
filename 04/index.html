@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta content="text/html;charset=utf-8" http-equiv="Content-Type">
+    <meta content="utf-8" http-equiv="encoding">
+    <title>Flashy Fish</title>
+    <style>
+      html, body {
+        margin: 0; padding: 0; height: 100%;
+        overflow: hidden !important;
+        background: url('bg.png');
+        background-size: cover;
+        background-position: center center;
+        background-repeat: no-repeat;
+        background-color: #000;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Helvetica Neue", sans-serif;
+      }
+      #c { width: 100%; height: 100%; display:block; }
+
+      #hud {
+        position: fixed; right: 12px; top: 10px; z-index: 5;
+        color: #E1EFFF; font-weight: 700; font-size: 16px; letter-spacing: .4px;
+        text-shadow: 0 0 6px #000, 0 0 10px #000;
+        user-select: none;
+      }
+      #hud span.value { display:inline-block; min-width: 36px; text-align: right; }
+
+      .overlay {
+        position: fixed; inset: 0; z-index: 10;
+        display: grid; place-items: center;
+        background: rgba(0,0,0,0.45);
+        user-select: none;
+      }
+      .panel {
+        position: relative;
+        padding: 16px 22px;
+        border-radius: 16px;
+        background: rgba(10, 12, 18, 0.75);
+        color: #E1EFFF;
+        max-width: min(92vw, 680px);
+        box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+        text-align: center;
+      }
+      .panel h1 { margin: 8px 0 12px; font-size: 22px; letter-spacing: .5px; }
+      .rules {
+        text-align: left; line-height: 1.45; font-size: 15px; margin: 8px 0 14px;
+      }
+      .rules li { margin: 6px 0; }
+      .play-btn {
+        display: inline-block;
+        cursor: pointer; border: none; background: transparent; padding: 0; margin-top: 10px;
+      }
+      .play-btn img { width: 200px; height: auto; filter: drop-shadow(0 4px 16px rgba(0,0,0,0.45)); }
+      .hidden { display: none !important; }
+    </style>
+  </head>
+
+  <script type="text/javascript" src="https://cs460.org/js/glmatrix.js"></script>
+
+  <script id="vertexshader" type="glsl">
+    attribute vec3 a_position;
+    uniform mat4 u_transform;
+    uniform float u_pointsize;
+    void main(void){
+      gl_Position = u_transform * vec4(a_position, 1.0);
+      gl_PointSize = u_pointsize;   // CORRECT: no 'gl.PointSize'
+    }
+  </script>
+  <script id="fragmentshader" type="glsl">
+    precision mediump float;
+    uniform vec4 u_color;
+    void main(void){ gl_FragColor = u_color; }
+  </script>
+
+  <script id="sprite_vs" type="glsl">
+    attribute vec2 a_pos;   // quad [-0.5..0.5]
+    attribute vec2 a_uv;    // [0..1]
+    uniform mat4 u_transform;
+    varying vec2 v_uv;
+    void main(){
+      gl_Position = u_transform * vec4(a_pos, 0.0, 1.0);
+      v_uv = a_uv;
+    }
+  </script>
+  <script id="sprite_fs" type="glsl">
+    precision mediump float;
+    varying vec2 v_uv;
+    uniform sampler2D u_tex;
+    uniform float u_alpha;
+    void main(){
+      vec4 tex = texture2D(u_tex, v_uv);
+      gl_FragColor = vec4(tex.rgb, tex.a * u_alpha);
+    }
+  </script>
+
+  <script>
+    var c, gl, v_shader, f_shader, shaderprogram;
+    var spriteProgram, sp_attrib_pos, sp_attrib_uv, sp_u_transform, sp_u_tex, sp_u_alpha;
+    var spriteVBO, spriteUVBO, spriteIBO;
+
+    var all_fish = [];
+    const WORLD_LEFT  = -2.0;
+    const WORLD_RIGHT =  2.0;
+
+    const keys = new Set();
+    let bigVel = [0, 0];
+    const ACCEL = 0.0025;
+    const FRICTION = 0.92;
+    const MAX_SPEED = 0.03;
+
+    const cameraX = 0.0;
+
+    // --- Game State ---
+    const START_TIME = 120;  // 2 minutes
+    let GAME = {
+      score: 0,
+      time: START_TIME,
+      running: false,
+      over: false
+    };
+    let lastTick = performance.now();
+
+    // --- Items ---
+    // Types: krabby patty (+2), hot sauce (-1), nasty patty (end), jelly (+10s)
+    const TYPE_KRABBY = 'krabby';
+    const TYPE_HOT    = 'hot';
+    const TYPE_NASTY  = 'nasty';
+    const TYPE_JELLY  = 'jelly';
+
+    const items = [];
+    let lastSpawn = performance.now();
+    let SPAWN_MS = 700;
+    let SWIM_SPEED = 0.01;
+
+    // Texture store
+    const textures = {};
+
+    // eyes
+    let onePointVBO = null;
+
+    // ========= INPUT =========
+    window.addEventListener('keydown', (e) => {
+      const k = e.key;
+      if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','w','a','s','d','W','A','S','D','m','M','-','+','='].includes(k)) {
+        keys.add(k);
+      }
+      // Pause / Restart
+      if (k === 'p' || k === 'P') { if (!GAME.over) GAME.running = !GAME.running; }
+      if (k === 'r' || k === 'R') { restartGame(); }
+    });
+    window.addEventListener('keyup', (e) => { keys.delete(e.key); });
+
+    window.onload = function() {
+      // Canvas + GL
+      c = document.getElementById('c');
+      c.width = window.innerWidth;
+      c.height = window.innerHeight;
+      gl = c.getContext('webgl');
+      gl.viewport(0, 0, c.width, c.height);
+
+      v_shader = gl.createShader(gl.VERTEX_SHADER);
+      f_shader = gl.createShader(gl.FRAGMENT_SHADER);
+      gl.shaderSource(v_shader, document.getElementById('vertexshader').innerText);
+      gl.compileShader(v_shader);
+      if (!gl.getShaderParameter(v_shader, gl.COMPILE_STATUS)) {
+        console.error('Vertex shader error:', gl.getShaderInfoLog(v_shader));
+      }
+      gl.shaderSource(f_shader, document.getElementById('fragmentshader').innerText);
+      gl.compileShader(f_shader);
+      if (!gl.getShaderParameter(f_shader, gl.COMPILE_STATUS)) {
+        console.error('Fragment shader error:', gl.getShaderInfoLog(f_shader));
+      }
+      shaderprogram = gl.createProgram();
+      gl.attachShader(shaderprogram, v_shader);
+      gl.attachShader(shaderprogram, f_shader);
+      gl.linkProgram(shaderprogram);
+      if (!gl.getProgramParameter(shaderprogram, gl.LINK_STATUS)) {
+        console.error('Program link error (fish):', gl.getProgramInfoLog(shaderprogram));
+      }
+
+      const spr_vs = gl.createShader(gl.VERTEX_SHADER);
+      const spr_fs = gl.createShader(gl.FRAGMENT_SHADER);
+      gl.shaderSource(spr_vs, document.getElementById('sprite_vs').innerText);
+      gl.compileShader(spr_vs);
+      if (!gl.getShaderParameter(spr_vs, gl.COMPILE_STATUS)) {
+        console.error('Sprite VS error:', gl.getShaderInfoLog(spr_vs));
+      }
+      gl.shaderSource(spr_fs, document.getElementById('sprite_fs').innerText);
+      gl.compileShader(spr_fs);
+      if (!gl.getShaderParameter(spr_fs, gl.COMPILE_STATUS)) {
+        console.error('Sprite FS error:', gl.getShaderInfoLog(spr_fs));
+      }
+      spriteProgram = gl.createProgram();
+      gl.attachShader(spriteProgram, spr_vs);
+      gl.attachShader(spriteProgram, spr_fs);
+      gl.linkProgram(spriteProgram);
+      if (!gl.getProgramParameter(spriteProgram, gl.LINK_STATUS)) {
+        console.error('Program link error (sprite):', gl.getProgramInfoLog(spriteProgram));
+      }
+
+      sp_attrib_pos = gl.getAttribLocation(spriteProgram, 'a_pos');
+      sp_attrib_uv  = gl.getAttribLocation(spriteProgram, 'a_uv');
+      sp_u_transform= gl.getUniformLocation(spriteProgram, 'u_transform');
+      sp_u_tex      = gl.getUniformLocation(spriteProgram, 'u_tex');
+      sp_u_alpha    = gl.getUniformLocation(spriteProgram, 'u_alpha');
+
+      buildSpriteBuffers();
+
+      // One big fish first (red), direction -1 (opposite to current)
+      all_fish.push( createFish(new Float32Array([0, 0, 0]),
+                                new Float32Array([1.,0.,0.,0.7]),
+                                1.0, -1) );
+
+      // Many small fish
+      for (let i = 0; i < 100; i++) {
+        const random_color  = new Float32Array([Math.random(), Math.random(), Math.random(), Math.random()]);
+        const random_offset = new Float32Array([Math.random()-Math.random(), Math.random()-Math.random(), 0]);
+        const random_scale  = Math.random() * 0.3;
+        all_fish.push( createFish(random_offset, random_color, random_scale, 1) );
+      }
+
+      // --- items ---
+      loadTexture('krabby', 'assets/img/krabby_patty.png');
+      loadTexture('hot',    'assets/img/hot_sauce.png');
+      loadTexture('nasty',  'assets/img/nasty_patty.png');
+      loadTexture('jelly',  'assets/img/jellyfish_jelly.png');
+
+      setupBgmControls();
+
+      document.getElementById('overlay-start').classList.remove('hidden');
+
+      onePointVBO = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, onePointVBO);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0,0,0]), gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+      animate();
+    };
+
+    
+    function createFish(offset, color, scale=1.0, direction=1) {
+      // Body vertices
+      var vertices = new Float32Array([
+        0.5,  0.0, 0.0,  // 0 nose
+        0.2,  0.25, 0.0, // 1 upper body
+       -0.2,  0.15, 0.0, // 2 upper tail base
+       -0.4,  0.3, 0.0,  // 3 upper tail tip
+       -0.4, -0.3, 0.0,  // 4 lower tail tip
+       -0.2, -0.15, 0.0, // 5 lower tail base
+        0.2, -0.25, 0.0  // 6 lower body
+      ]);
+      
+      var indices = new Uint8Array([ 0,1,6, 1,2,6, 2,5,6, 2,3,5, 3,4,5 ]);
+
+      // Buffers
+      var v_buffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, v_buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+      var i_buffer = gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, i_buffer);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+
+      // Eye buffer
+      var eyeY = (direction == -1) ? -0.2 : 0.2;
+      var eye_vertex = new Float32Array([0.2, eyeY, 0.0]);
+      var eye_v_buffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, eye_v_buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, eye_vertex, gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+      return [v_buffer, i_buffer, eye_v_buffer, color, offset, scale, direction];
+    }
+
+    function buildSpriteBuffers(){
+      // Quad positions
+      const p = new Float32Array([
+        -0.5, -0.5,
+         0.5, -0.5,
+         0.5,  0.5,
+        -0.5,  0.5
+      ]);
+      const uv = new Float32Array([ 0,1,  1,1,  1,0,  0,0 ]);
+      const idx = new Uint16Array([0,1,2, 0,2,3]);
+
+      spriteVBO = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, spriteVBO);
+      gl.bufferData(gl.ARRAY_BUFFER, p, gl.STATIC_DRAW);
+
+      spriteUVBO = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, spriteUVBO);
+      gl.bufferData(gl.ARRAY_BUFFER, uv, gl.STATIC_DRAW);
+
+      spriteIBO = gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, spriteIBO);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, null);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+    }
+
+    function loadTexture(name, url){
+      const tex = gl.createTexture();
+      textures[name] = tex;
+      const img = new Image();
+      img.onload = () => {
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+      };
+      img.src = url;
+    }
+
+    // ====== Items ======
+    function spawnItem(){
+      // weighted random: krabby patty (40%), hot (30%), jelly (20%), nasty (10%)
+      const r = Math.random();
+      let type = TYPE_KRABBY;
+      if (r < 0.4) type = TYPE_KRABBY;
+      else if (r < 0.7) type = TYPE_HOT;
+      else if (r < 0.9) type = TYPE_JELLY;
+      else type = TYPE_NASTY;
+
+      const y = (Math.random()*2-1)*0.85;
+      let size= 0.22, speed= 0.012, rad=0.10;
+      if (type===TYPE_KRABBY){ size=0.20; speed=0.012; rad=0.09; }
+      if (type===TYPE_HOT)   { size=0.18; speed=0.013; rad=0.08; }
+      if (type===TYPE_JELLY) { size=0.22; speed=0.011; rad=0.10; }
+      if (type===TYPE_NASTY) { size=0.25; speed=0.010; rad=0.12; }
+
+      items.push({ type, x: -2.2, y, r: rad, size, speed, tex: textures[type] || null });
+      if (items.length>60) items.shift();
+    }
+
+    function circleHit(ax,ay, ar, bx,by, br){
+      const dx=ax-bx, dy=ay-by; return (dx*dx+dy*dy) <= (ar+br)*(ar+br);
+    }
+
+    function handleItemEffects(i){
+      const it = items[i];
+      if (!it) return;
+      if (it.type===TYPE_KRABBY){ GAME.score += 2; sfxPing(880, 0.08, 0.08); }
+      else if (it.type===TYPE_HOT){ GAME.score = Math.max(0, GAME.score - 1); sfxPing(360, 0.07, 0.06); }
+      else if (it.type===TYPE_JELLY){ GAME.time = Math.min(599, GAME.time + 10); sfxPing(520, 0.09, 0.10); }
+      else if (it.type===TYPE_NASTY){ gameOver(); sfxPing(140, 0.10, 0.15); }
+      items.splice(i,1);
+    }
+
+    // ====== Audio ======
+    let audioCtx = null;
+    try { audioCtx = new (window.AudioContext||window.webkitAudioContext)(); } catch(e){}
+    function sfxPing(freq=800, vol=0.08, dur=0.08){
+      if (!audioCtx) return;
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type='sine';
+      o.frequency.setValueAtTime(freq, audioCtx.currentTime);
+      g.gain.setValueAtTime(vol, audioCtx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + dur);
+      o.connect(g).connect(audioCtx.destination);
+      o.start(); o.stop(audioCtx.currentTime + dur);
+    }
+
+    // ====== Animate / Game Loop ======
+    function animate() {
+      requestAnimationFrame(animate);
+
+      // alpha blending
+      gl.clearColor(0., 0., 0., 0.);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.enable(gl.BLEND);
+      gl.blendEquation(gl.FUNC_ADD);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.disable(gl.DEPTH_TEST);
+
+      // ===== Big fish movement =====
+      const a_position_f = gl.getAttribLocation(shaderprogram, 'a_position');
+      const u_color_f     = gl.getUniformLocation(shaderprogram, 'u_color');
+      const u_pointsize_f = gl.getUniformLocation(shaderprogram, 'u_pointsize');
+      const u_transform_f = gl.getUniformLocation(shaderprogram, 'u_transform');
+
+      const big = all_fish[0];
+      const o = big[4];
+      const sclBig = big[5];
+
+      if (GAME.running && !GAME.over) {
+        let ax = 0, ay = 0;
+        if (keys.has('ArrowUp') || keys.has('w') || keys.has('W')) ay += ACCEL;
+        if (keys.has('ArrowDown') || keys.has('s') || keys.has('S')) ay -= ACCEL;
+        if (keys.has('ArrowRight') || keys.has('d') || keys.has('D')) ax += ACCEL;
+        if (keys.has('ArrowLeft') || keys.has('a') || keys.has('A')) ax -= ACCEL;
+
+        bigVel[0] += ax; bigVel[1] += ay;
+        const m = Math.hypot(bigVel[0], bigVel[1]);
+        if (m > MAX_SPEED) { bigVel[0]*=(MAX_SPEED/m); bigVel[1]*=(MAX_SPEED/m); }
+        bigVel[0]*=FRICTION; bigVel[1]*=FRICTION;
+
+        o[0] += bigVel[0]; o[1] += bigVel[1];
+      }
+
+      const xLeft=-0.4*sclBig, xRight=0.5*sclBig, yBottom=-0.3*sclBig, yTop=0.3*sclBig;
+      const MIN_X=-1.0 - xLeft, MAX_X=1.0 - xRight, MIN_Y=-1.0 - yBottom, MAX_Y=1.0 - yTop;
+      if (o[0] < MIN_X) { o[0]=MIN_X; bigVel[0]=0; }
+      if (o[0] > MAX_X) { o[0]=MAX_X; bigVel[0]=0; }
+      if (o[1] < MIN_Y) { o[1]=MIN_Y; bigVel[1]=0; }
+      if (o[1] > MAX_Y) { o[1]=MAX_Y; bigVel[1]=0; }
+
+      // ===== Small fish drift =====
+      for (var r = 1; r < all_fish.length; r++) {
+        var cur = all_fish[r];
+        var off = cur[4];
+        var dir = cur[6];
+        // drift + wiggle (dir = +1 → right)
+        off[0] += SWIM_SPEED * dir;
+        off[1] += 0.1 * Math.random(); off[1] -= 0.1 * Math.random();
+        if (off[0] > WORLD_RIGHT) off[0] = WORLD_LEFT;
+        if (off[0] < WORLD_LEFT)  off[0] = WORLD_RIGHT;
+        cur[4] = off;
+      }
+
+      // ===== Timer, spawn, update items =====
+      const now = performance.now();
+      if (GAME.running && !GAME.over) {
+        if (now - lastTick >= 1000) {
+          lastTick = now;
+          if (GAME.time > 0) GAME.time--;
+          // every 10s, mild ramp
+          if (GAME.time % 10 === 0 && GAME.time !== 0) {
+            SWIM_SPEED = Math.min(0.02, SWIM_SPEED + 0.001);
+            SPAWN_MS   = Math.max(400, SPAWN_MS - 20);
+          }
+        }
+        if (now - lastSpawn >= SPAWN_MS) { lastSpawn = now; spawnItem(); }
+
+        for (const it of items) { it.x += it.speed; }
+        while(items.length && items[0].x > 2.4) items.shift();
+
+        // collisions with player
+        const pr = 0.35;
+        for (let i = items.length-1; i>=0; i--) {
+          if (circleHit(o[0],o[1], pr, items[i].x, items[i].y, items[i].r)) {
+            handleItemEffects(i);
+          }
+        }
+
+        // time up?
+        if (GAME.time <= 0) { gameOver(); }
+      }
+
+      // ===== Draw items (sprites) =====
+      gl.useProgram(spriteProgram);
+      gl.bindBuffer(gl.ARRAY_BUFFER, spriteVBO);
+      gl.enableVertexAttribArray(sp_attrib_pos);
+      gl.vertexAttribPointer(sp_attrib_pos, 2, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, spriteUVBO);
+      gl.enableVertexAttribArray(sp_attrib_uv);
+      gl.vertexAttribPointer(sp_attrib_uv, 2, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, spriteIBO);
+
+      for (const it of items) {
+        const s = it.size;
+        const T = new Float32Array([
+          s,0,0,0,
+          0,s,0,0,
+          0,0,1,0,
+          it.x - cameraX, it.y, 0, 1
+        ]);
+        gl.uniformMatrix4fv(sp_u_transform, false, T);
+        gl.uniform1f(sp_u_alpha, 0.95);
+        if (it.tex) {
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, it.tex);
+          gl.uniform1i(sp_u_tex, 0);
+        }
+        gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+      }
+
+      // ===== Draw fish (body + eyes) =====
+      gl.useProgram(shaderprogram);
+
+      for (var r = 0; r < all_fish.length; r++) {
+        var cur = all_fish[r];
+        var vbuf  = cur[0];
+        var ibuf  = cur[1];
+        var eyeb  = cur[2];
+        var color = cur[3];
+        var off   = cur[4];
+        var scl   = cur[5];
+        var dir   = cur[6];
+
+        var theta = (Math.random() * 10.0) * Math.PI / 180.0;
+        var viewX = off[0] - cameraX;
+        var viewY = off[1];
+
+        var transform = new Float32Array([
+          dir * scl * Math.cos(theta),   Math.sin(theta),                 0, 0,
+         -Math.sin(theta),               dir * scl * Math.cos(theta),     0, 0,
+          0,                              0,                               dir * scl * 1.0, 0,
+          viewX,                          viewY,                           off[2], 1
+        ]);
+
+        // Body
+        gl.bindBuffer(gl.ARRAY_BUFFER, vbuf);
+        gl.vertexAttribPointer(a_position_f, 3, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(a_position_f);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibuf);
+
+        var col = color;
+        if (r !== 0) {
+          var t = performance.now() * 0.001;
+          var a = 0.6 + 0.4 * Math.sin(t * 2.0);
+          col = new Float32Array([
+            0.3 + 0.2*Math.sin(t + 0.0),
+            0.6 + 0.2*Math.sin(t + 2.0),
+            0.9 + 0.1*Math.sin(t + 4.0),
+            a
+          ]);
+        }
+        gl.uniformMatrix4fv(u_transform_f, false, transform);
+        gl.uniform4fv(u_color_f, col);
+        gl.drawElements(gl.TRIANGLES, 15, gl.UNSIGNED_BYTE, 0);
+
+        // Eye
+        gl.uniform4fv(u_color_f, new Float32Array([0, 0, 0, 0.5]));
+        gl.uniform1f(u_pointsize_f, scl * 20.0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, eyeb);
+        gl.vertexAttribPointer(a_position_f, 3, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(a_position_f);
+        gl.uniformMatrix4fv(u_transform_f, false, transform);
+        gl.drawArrays(gl.POINTS, 0, 1);
+      }
+
+      // ===== HUD text update =====
+      document.getElementById('score').textContent = GAME.score;
+      document.getElementById('time').textContent  = GAME.time;
+    };
+
+    // ====== Game control ======
+    function startGame(){
+      GAME.score = 0;
+      GAME.time  = START_TIME;
+      GAME.over  = false;
+      GAME.running = true;
+      items.length = 0;
+      lastTick = performance.now();
+      lastSpawn = performance.now();
+      SWIM_SPEED = 0.01;
+      SPAWN_MS = 700;
+      document.getElementById('overlay-start').classList.add('hidden');
+      document.getElementById('overlay-over').classList.add('hidden');
+    }
+    function restartGame(){ startGame(); }
+    function gameOver(){
+      if (GAME.over) return;
+      GAME.running = false; GAME.over = true;
+      const over = document.getElementById('overlay-over');
+      over.querySelector('.final-score').textContent = GAME.score;
+      over.classList.remove('hidden');
+    }
+
+    // ========= BACKGROUND MUSIC =========
+    function setupBgmControls() {
+      const bgm = document.getElementById('bgm');
+      if (!bgm) return;
+
+      let bgmEnabled = (localStorage.getItem('bgmEnabled') ?? 'true') === 'true';
+      let bgmVol = parseFloat(localStorage.getItem('bgmVol') ?? '0.35');
+      bgm.volume = Math.min(Math.max(bgmVol, 0), 1);
+
+      // Start only after a user gesture
+      let bgmStarted = false;
+      function tryStart() {
+        if (!bgmStarted) {
+          bgmStarted = true;
+          if (bgmEnabled) bgm.play().catch(()=>{/* ignore policy errors */});
+        }
+      }
+      window.addEventListener('pointerdown', tryStart, { once:true });
+      window.addEventListener('keydown', tryStart, { once:true });
+
+      // Keyboard toggles:
+      //  M    -> mute/unmute
+      //  -    -> volume down
+      //  =/+  -> volume up
+      window.addEventListener('keydown', (e) => {
+        if (e.key === 'm' || e.key === 'M') {
+          bgmEnabled = !bgmEnabled;
+          localStorage.setItem('bgmEnabled', String(bgmEnabled));
+          if (bgmEnabled) bgm.play().catch(()=>{}); else bgm.pause();
+        } else if (e.key === '-' ) {
+          bgmVol = Math.max(0, bgm.volume - 0.05);
+          bgm.volume = bgmVol; localStorage.setItem('bgmVol', String(bgmVol));
+        } else if (e.key === '=' || e.key === '+') {
+          bgmVol = Math.min(1, bgm.volume + 0.05);
+          bgm.volume = bgmVol; localStorage.setItem('bgmVol', String(bgmVol));
+        }
+      });
+    }
+  </script>
+
+  <body>
+    <canvas id="c"></canvas>
+
+    <!-- HUD -->
+    <div id="hud">
+      Points: <span id="score" class="value">0</span> &nbsp;&nbsp; Time: <span id="time" class="value">120</span>
+    </div>
+
+    <!-- START OVERLAY (rules + play button) -->
+    <div id="overlay-start" class="overlay hidden">
+      <div class="panel">
+        <img src="assets/img/rule_panel.png" alt="" onerror="this.style.display='none'" style="max-width:100%;margin-bottom:10px;">
+        <h1>Rules</h1>
+        <ul class="rules">
+          <li>You got <b>120</b> seconds.</li>
+          <li><b>Krabby Patty</b> → <b>+2</b> points.</li>
+          <li><b>Hot sauce</b> → <b>−1</b> point.</li>
+          <li><b>Jellyfishing jelly</b> → <b>+10s</b> time.</li>
+          <li><b>Nasty patty</b> → <b>Game Over</b>.</li>
+          <li>Move the big red fish with <b>WASD / Arrow keys</b>.</li>
+        </ul>
+        <button class="play-btn" onclick="startGame()" aria-label="Play">
+          <img src="assets/img/play_button.png" alt="Play">
+        </button>
+        <center><b>BY ROHITH ANKALLA</b></center>
+      </div>
+    </div>
+
+    <!-- GAME OVER OVERLAY -->
+    <div id="overlay-over" class="overlay hidden">
+      <div class="panel">
+        <img src="assets/img/game_over.png" alt="Game Over" style="max-width: 80%; height:auto; margin-bottom:8px;">
+        <div style="font-size:18px; margin:6px 0 10px;">Your Score: <b class="final-score">0</b></div>
+        <button class="play-btn" onclick="restartGame()" aria-label="Play Again">
+          <img src="assets/img/play_button.png" alt="Play Again">
+        </button>
+      </div>
+    </div>
+
+    <!-- Background music -->
+    <audio id="bgm" src="assets/audio/bg_loop.m4a" loop preload="auto"></audio>
+  </body>
+</html>
