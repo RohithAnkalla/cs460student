@@ -22,10 +22,8 @@ let lastSpawn = performance.now();
 let SPAWN_MS = 700;
 let SWIM_SPEED = 0.01;
 
-const allFish = [];
+const allFish = []; // big + smalls
 const cameraX = 0.0;
-
-let _fishTheta = [];
 
 /////////////////////// INPUT ///////////////////////
 window.addEventListener('keydown', (e)=>{
@@ -108,19 +106,18 @@ function handleItemEffects(i){
 /////////////////////// WEBGPU GLOBALS ///////////////////////
 let device, context, format;
 let fishPipeline, spritePipeline, eyePipeline;
-let fishVB, fishIB;           
-let quadVB, quadUVB, quadIB;  
+let fishVB, fishIB;           // fish mesh
+let quadVB, quadUVB, quadIB;  // shared quad for sprites/eyes
 
-// per-instance vertex buffers
-let fishOffsetVB, fishColorVB, fishParamsVB;   
-let eyeOffsetVB,  eyeScaleVB;                  
-let spOffsetScaleVB, spAlphaVB;                
+let fishOffsetVB, fishColorVB, fishParamsVB;
+let eyeOffsetVB,  eyeScaleVB;
+let spOffsetScaleVB, spAlphaVB;
 
 let spriteSampler;
-const spriteTextures = {}; 
+const spriteTextures = {};
 
 /////////////////////// HELPERS ///////////////////////
-function matAngle() { return (Math.random()*10.0) * Math.PI/180.0; } 
+function matAngle() { return (Math.random()*10.0) * Math.PI/180.0; }
 
 async function loadTexture(url){
   const img = await new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=rej; i.src=url; });
@@ -136,7 +133,8 @@ async function loadTexture(url){
 
 function ensureSizedBuffer(oldBuf, byteLen, usage){
   if (oldBuf && oldBuf.size >= byteLen) return oldBuf;
-  return device.createBuffer({ size: byteLen, usage, mappedAtCreation:false });
+  const padded = (byteLen + 3) & ~3;
+  return device.createBuffer({ size: padded, usage, mappedAtCreation:false });
 }
 
 /////////////////////// WEBGPU INIT ///////////////////////
@@ -149,6 +147,7 @@ async function initWebGPU(){
   format  = navigator.gpu.getPreferredCanvasFormat();
   context.configure({ device, format, alphaMode:'premultiplied' });
 
+  // DPI resize
   const resize = ()=>{
     const dpr = window.devicePixelRatio||1;
     canvas.width  = Math.floor(canvas.clientWidth  * dpr);
@@ -170,19 +169,19 @@ async function initWebGPU(){
     vertex: {
       module: fishVS,
       buffers: [
-        { 
+        {
           arrayStride: 3*4,
           attributes: [{ shaderLocation:0, offset:0, format:'float32x3' }]
         },
-        { 
+        {
           arrayStride: 3*4, stepMode:'instance',
           attributes: [{ shaderLocation:1, offset:0, format:'float32x3' }]
         },
-        { 
+        {
           arrayStride: 4*4, stepMode:'instance',
           attributes: [{ shaderLocation:2, offset:0, format:'float32x4' }]
         },
-        { 
+        {
           arrayStride: 3*4, stepMode:'instance',
           attributes: [
             { shaderLocation:3, offset:0*4, format:'float32' },
@@ -201,21 +200,22 @@ async function initWebGPU(){
     primitive:{ topology:'triangle-list' }
   });
 
+  // SPRITE PIPELINE
   spritePipeline = device.createRenderPipeline({
     layout: 'auto',
     vertex: {
       module: spVS,
       buffers:[
-        { arrayStride: 2*4, attributes:[{shaderLocation:0, offset:0, format:'float32x2'}] }, 
-        { arrayStride: 2*4, attributes:[{shaderLocation:1, offset:0, format:'float32x2'}] }, 
+        { arrayStride: 2*4, attributes:[{shaderLocation:0, offset:0, format:'float32x2'}] }, // quad
+        { arrayStride: 2*4, attributes:[{shaderLocation:1, offset:0, format:'float32x2'}] }, // uv
         { arrayStride: 3*4, stepMode:'instance',
           attributes:[
-            {shaderLocation:2, offset:0*4, format:'float32x2'}, 
-            {shaderLocation:3, offset:2*4, format:'float32'}
+            {shaderLocation:2, offset:0*4, format:'float32x2'}, // offset x,y
+            {shaderLocation:3, offset:2*4, format:'float32'}    // scale
           ]
         },
         { arrayStride: 1*4, stepMode:'instance',
-          attributes:[{shaderLocation:4, offset:0, format:'float32'}] }
+          attributes:[{shaderLocation:4, offset:0, format:'float32'}] } // alpha
       ]
     },
     fragment: {
@@ -233,10 +233,10 @@ async function initWebGPU(){
     vertex: {
       module: eyeVS,
       buffers:[
-        { arrayStride: 2*4, attributes:[{shaderLocation:0, offset:0, format:'float32x2'}] },
-        { arrayStride: 2*4, attributes:[{shaderLocation:1, offset:0, format:'float32x2'}] },
-        { arrayStride: 2*4, stepMode:'instance', attributes:[{shaderLocation:2, offset:0, format:'float32x2'}] },
-        { arrayStride: 2*4, stepMode:'instance', attributes:[{shaderLocation:3, offset:0, format:'float32x2'}] }
+        { arrayStride: 2*4, attributes:[{shaderLocation:0, offset:0, format:'float32x2'}] }, // quad
+        { arrayStride: 2*4, attributes:[{shaderLocation:1, offset:0, format:'float32x2'}] }, // uv
+        { arrayStride: 2*4, stepMode:'instance', attributes:[{shaderLocation:2, offset:0, format:'float32x2'}] }, // offset
+        { arrayStride: 2*4, stepMode:'instance', attributes:[{shaderLocation:3, offset:0, format:'float32x2'}] }  // scale vec2
       ]
     },
     fragment: {
@@ -248,28 +248,29 @@ async function initWebGPU(){
     primitive:{ topology:'triangle-list' }
   });
 
+  
   {
     const verts = new Float32Array([
-      0.5,  0.0, 0.0, // 0 nose
-      0.2,  0.25,0.0, // 1 upper body
-     -0.2,  0.15,0.0, // 2 upper tail base
-     -0.4,  0.3, 0.0, // 3 upper tail tip
-     -0.4, -0.3, 0.0, // 4 lower tail tip
-     -0.2, -0.15,0.0, // 5 lower tail base
-      0.2, -0.25,0.0  // 6 lower body
+      0.5,  0.0, 0.0,
+      0.2,  0.25,0.0,
+     -0.2,  0.15,0.0,
+     -0.4,  0.3, 0.0,
+     -0.4, -0.3, 0.0,
+     -0.2, -0.15,0.0,
+      0.2, -0.25,0.0
     ]);
     const idx = new Uint16Array([0,1,6, 1,2,6, 2,5,6, 2,3,5, 3,4,5]);
-    const idxPadded =
-      (idx.length % 2 === 1) ? (() => { const t = new Uint16Array(idx.length + 1); t.set(idx); return t; })()
-                             : idx;
+    const idxPadded = (idx.length % 2 === 1)
+      ? (() => { const t = new Uint16Array(idx.length + 1); t.set(idx); return t; })()
+      : idx;
 
-    fishVB = device.createBuffer({ size: verts.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-    fishIB = device.createBuffer({ size: idxPadded.byteLength, usage: GPUBufferUsage.INDEX  | GPUBufferUsage.COPY_DST });
-
+    fishVB = device.createBuffer({ size: verts.byteLength, usage: GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST });
+    fishIB = device.createBuffer({ size: idxPadded.byteLength, usage: GPUBufferUsage.INDEX |GPUBufferUsage.COPY_DST  });
     device.queue.writeBuffer(fishVB, 0, verts);
     device.queue.writeBuffer(fishIB, 0, idxPadded);
   }
 
+  // Shared quad (sprites + eyes)
   {
     const p = new Float32Array([ -0.5,-0.5,  0.5,-0.5,  0.5,0.5,  -0.5,0.5 ]);
     const uv= new Float32Array([  0,1,      1,1,        1,0,       0,0     ]);
@@ -282,6 +283,7 @@ async function initWebGPU(){
     device.queue.writeBuffer(quadIB, 0, ib);
   }
 
+  // Sampler + textures
   spriteSampler = device.createSampler({ magFilter:'linear', minFilter:'linear' });
   spriteTextures.krabby = await loadTexture('assets/img/krabby_patty.png');
   spriteTextures.hot    = await loadTexture('assets/img/hot_sauce.png');
@@ -387,10 +389,7 @@ function buildFishInstanceBuffers(){
     }
     pars[i*3+0] = f.s;
     pars[i*3+1] = f.d;
-
-    const theta = Math.sin(t*2.0 + i*0.9) * 0.15;
-    pars[i*3+2] = theta;
-    _fishTheta[i] = theta;
+    pars[i*3+2] = matAngle();
   }
   fishOffsetVB = ensureSizedBuffer(fishOffsetVB, offs.byteLength, GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST);
   fishColorVB  = ensureSizedBuffer(fishColorVB,  cols.byteLength, GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST);
@@ -402,8 +401,7 @@ function buildFishInstanceBuffers(){
 
 function buildEyeInstanceBuffers(){
   const N = allFish.length;
-
-  const offs   = new Float32Array(N*2);
+  const offs = new Float32Array(N*2);
   const scales = new Float32Array(N*2);
 
   const canvas = document.getElementById('c');
@@ -411,39 +409,27 @@ function buildEyeInstanceBuffers(){
   const H = canvas.height;
   const aspectFix = H / W;
 
-  for (let i = 0; i < N; i++){
+  for (let i=0;i<N;i++){
     const f = allFish[i];
+    const eyeY = (f.d === -1) ? -0.2 : 0.2;
+    const ex = 0.2 * f.s * f.d;
+    const ey = eyeY * f.s;
+    offs[i*2+0] = (f.x - cameraX) + ex;
+    offs[i*2+1] = f.y + ey;
 
-    // Local anchor before rotation (fish space)
-    const exLocal = 0.18 * f.s * f.d;
-    const eyLocal = 0.06 * f.s;
-
-    // Rotate by the same wobble as fish VS
-    const theta = _fishTheta[i] || 0.0;
-    const c = Math.cos(theta), s = Math.sin(theta);
-    const sx = f.s * f.d;
-    const sy = f.s;
-    const rx =  sx*c*exLocal + sx*s*eyLocal;
-    const ry = -sy*s*exLocal + sy*c*eyLocal;
-
-    // World position
-    offs[i*2 + 0] = (f.x - cameraX) + rx;
-    offs[i*2 + 1] = f.y + ry;
-
-    const px = Math.max(2, f.s * 18);
+    const px = Math.max(2, f.s * 20);
     const ndc = (2 * px) / H;
     scales[i*2 + 0] = ndc * aspectFix;
-    scales[i*2 + 1] = ndc;
+    scales[i*2 + 1] = ndc;             
   }
 
-  eyeOffsetVB = ensureSizedBuffer(eyeOffsetVB, offs.byteLength, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST);
-  eyeScaleVB  = ensureSizedBuffer(eyeScaleVB,  scales.byteLength, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST);
-
+  eyeOffsetVB = ensureSizedBuffer(eyeOffsetVB, offs.byteLength, GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST);
+  eyeScaleVB  = ensureSizedBuffer(eyeScaleVB,  scales.byteLength, GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST);
   device.queue.writeBuffer(eyeOffsetVB, 0, offs);
   device.queue.writeBuffer(eyeScaleVB,  0, scales);
 }
 
-function buildSpriteInstanceBuffers(){
+function buildSpriteInstanceData(){
   const buckets = { krabby:[], hot:[], jelly:[], nasty:[] };
   for (const it of items) buckets[it.type].push(it);
 
@@ -485,12 +471,12 @@ function drawFrame(){
   const pass = enc.beginRenderPass({
     colorAttachments:[{
       view,
-      clearValue: { r: 0, g: 0, b: 0, a: 0 },
+      clearValue:{r:0, g:0, b:0, a:0},
       loadOp:'clear', storeOp:'store'
     }]
   });
 
-  // --- Fish ---
+  // Fish
   buildFishInstanceBuffers();
   pass.setPipeline(fishPipeline);
   pass.setVertexBuffer(0, fishVB);
@@ -500,7 +486,7 @@ function drawFrame(){
   pass.setIndexBuffer(fishIB, 'uint16');
   pass.drawIndexed(15, allFish.length, 0, 0, 0);
 
-  // --- Eyes ---
+  // Eyes
   buildEyeInstanceBuffers();
   pass.setPipeline(eyePipeline);
   pass.setVertexBuffer(0, quadVB);
@@ -510,16 +496,14 @@ function drawFrame(){
   pass.setIndexBuffer(quadIB, 'uint16');
   pass.drawIndexed(6, allFish.length, 0, 0, 0);
 
-  // --- Sprites ---
-  const { buckets, A } = buildSpriteInstanceBuffers();
+  // Sprites by type
+  const { buckets, A } = buildSpriteInstanceData();
   pass.setPipeline(spritePipeline);
   pass.setVertexBuffer(0, quadVB);
   pass.setVertexBuffer(1, quadUVB);
 
   const drawBucket = (type, arrays)=>{
-    const n = arrays.alpha.length;
-    if (!n) return;
-
+    const n = arrays.alpha.length; if (!n) return;
     spOffsetScaleVB = ensureSizedBuffer(spOffsetScaleVB, arrays.offScale.byteLength, GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST);
     spAlphaVB       = ensureSizedBuffer(spAlphaVB,       arrays.alpha.byteLength,    GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST);
     device.queue.writeBuffer(spOffsetScaleVB, 0, arrays.offScale);
@@ -536,11 +520,9 @@ function drawFrame(){
       ]
     });
     pass.setBindGroup(0, bg);
-
     pass.setIndexBuffer(quadIB, 'uint16');
     pass.drawIndexed(6, n, 0, 0, 0);
   };
-
   drawBucket('krabby', A.krabby);
   drawBucket('hot',    A.hot);
   drawBucket('jelly',  A.jelly);

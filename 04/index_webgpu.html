@@ -55,7 +55,6 @@
     .play-btn { display:inline-block; cursor:pointer; border:none; background:transparent; padding:0; margin-top:10px; }
     .play-btn img { width:200px; height:auto; filter: drop-shadow(0 4px 16px rgba(0,0,0,0.45)); }
     .hidden { display: none !important; }
-    .banner { display: none !important; }
   </style>
 
   <!-- ================== FISH ================== -->
@@ -145,7 +144,7 @@
     fn main(
       @location(0) a_pos   : vec2<f32>,   // quad [-0.5..0.5]
       @location(1) a_uv    : vec2<f32>,
-      @location(2) i_off   : vec2<f32>,   // per-eye world offset (NDC center)
+      @location(2) i_off   : vec2<f32>,   // per-eye world offset
       @location(3) i_scale : vec2<f32>    // per-eye scale (x,y) in NDC
     ) -> VSOut {
       let p = vec2<f32>(
@@ -162,10 +161,9 @@
   <script id="eye_fs" type="wgsl">
     @fragment
     fn main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-      // Soft circular mask centered at (0.5, 0.5) with gentle falloff
       let d = distance(uv, vec2<f32>(0.5, 0.5));
-      let edge = 1.0 - smoothstep(0.48, 0.50, d);
-      return vec4<f32>(0.0, 0.0, 0.0, 0.38 * edge);
+      if (d > 0.5) { discard; }
+      return vec4<f32>(0.0, 0.0, 0.0, 0.45);  // softer alpha
     }
   </script>
 </head>
