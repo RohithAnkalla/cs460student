@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>CS460 A5 – WebGPU PolyCam Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #05070b;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Helvetica Neue", sans-serif;
+      color: #E1EFFF;
+    }
+    #renderCanvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    #label {
+      position: fixed;
+      left: 12px;
+      bottom: 10px;
+      font-size: 12px;
+      opacity: 0.75;
+      z-index: 5;
+      pointer-events: none;
+      text-shadow: 0 0 6px #000;
+    }
+  </style>
+
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <script src="https://cdn.babylonjs.com/loaders/babylon.glTF2FileLoader.min.js"></script>
+</head>
+<body>
+  <canvas id="renderCanvas"></canvas>
+  <div id="label">CS460 A5 · WebGPU · poly.glb</div>
+
+  <script type="module">
+    const canvas = document.getElementById("renderCanvas");
+
+    async function main() {
+      const engine = new BABYLON.WebGPUEngine(canvas, { antialiasing: true });
+      await engine.initAsync();
+
+      const scene = new BABYLON.Scene(engine);
+      await BABYLON.SceneLoader.AppendAsync("", "poly.glb", scene);
+
+      scene.createDefaultCameraOrLight(true, true, true);
+
+      if (scene.activeCamera) {
+        scene.activeCamera.attachControl(canvas, true);
+      }
+
+      scene.clearColor = new BABYLON.Color4(0.02, 0.02, 0.04, 1.0);
+
+      engine.runRenderLoop(() => {
+        scene.render();
+      });
+
+      window.addEventListener("resize", () => {
+        engine.resize();
+      });
+    }
+
+    main().catch((e) => {
+      console.error("WebGPU initialization failed:", e);
+      const label = document.getElementById("label");
+      if (label) {
+        label.textContent = "WebGPU not supported / failed to init. Check browser flags.";
+      }
+    });
+  </script>
+</body>
+</html>

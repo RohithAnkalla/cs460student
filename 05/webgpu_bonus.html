@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>CS460 A5 – WebGPU SUPER BONUS</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #05070b;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Helvetica Neue", sans-serif;
+      color: #E1EFFF;
+    }
+    #renderCanvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    #label {
+      position: fixed;
+      left: 12px;
+      bottom: 10px;
+      font-size: 12px;
+      opacity: 0.8;
+      z-index: 5;
+      pointer-events: none;
+      text-shadow: 0 0 6px #000;
+    }
+    #controls {
+      position: fixed;
+      right: 12px;
+      top: 10px;
+      z-index: 10;
+      background: rgba(5, 7, 12, 0.9);
+      border-radius: 12px;
+      padding: 10px 12px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      border: 1px solid rgba(255,255,255,0.06);
+      font-size: 13px;
+    }
+    #controls h3 {
+      margin: 0 0 6px;
+      font-size: 13px;
+      letter-spacing: .3px;
+    }
+    #controls button {
+      display: inline-block;
+      margin: 3px 2px;
+      padding: 4px 8px;
+      font-size: 12px;
+      border-radius: 999px;
+      border: none;
+      cursor: pointer;
+      background: #1a2335;
+      color: #E1EFFF;
+      transition: background 0.15s ease, transform 0.08s ease;
+    }
+    #controls button:hover {
+      background: #304674;
+      transform: translateY(-1px);
+    }
+    #controls button.active {
+      background: #4a8bff;
+    }
+  </style>
+
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <script src="https://cdn.babylonjs.com/loaders/babylon.glTF2FileLoader.min.js"></script>
+</head>
+<body>
+  <canvas id="renderCanvas"></canvas>
+
+  <div id="label">CS460 A5 · WebGPU SUPER BONUS · poly.glb materials</div>
+
+  <div id="controls">
+    <h3>Material</h3>
+    <div>
+      <button data-mat="original" class="active">Original</button>
+      <button data-mat="ani">Ani</button>
+      <button data-mat="holo">Holo</button>
+      <button data-mat="glass">Glass</button>
+      <button data-mat="sss">SSS</button>
+      <button data-mat="iri">Iri</button>
+    </div>
+  </div>
+
+  <script type="module">
+    const canvas = document.getElementById("renderCanvas");
+    const controls = document.getElementById("controls");
+    const buttons = Array.from(controls.querySelectorAll("button"));
+
+    let engine, scene;
+    let targetMeshes = [];
+    const originalMaterials = new Map();
+    const materials = {};
+    let currentMat = "original";
+    let time = 0;
+
+    async function main() {
+      engine = new BABYLON.WebGPUEngine(canvas, { antialiasing: true });
+      await engine.initAsync();
+
+      scene = new BABYLON.Scene(engine);
+      scene.clearColor = new BABYLON.Color4(0.02, 0.02, 0.04, 1.0);
+
+      await BABYLON.SceneLoader.AppendAsync("", "edited.glb", scene);
+
+      scene.createDefaultCameraOrLight(true, true, true);
+      if (scene.activeCamera) {
+        scene.activeCamera.attachControl(canvas, true);
+      }
+
+      targetMeshes = scene.meshes.filter(m => m.material);
+      targetMeshes.forEach(m => originalMaterials.set(m, m.material));
+
+      setupMaterials();
+
+      buttons.forEach(btn => {
+        btn.addEventListener("click", () => {
+          const name = btn.dataset.mat;
+          setMaterial(name);
+          currentMat = name;
+
+          buttons.forEach(b => b.classList.toggle("active", b === btn));
+        });
+      });
+
+      engine.runRenderLoop(() => {
+        const dt = engine.getDeltaTime() * 0.001;
+        time += dt;
+
+        if (currentMat === "ani" && materials.ani) {
+          const hue = (Math.sin(time * 1.5) * 0.5 + 0.5);
+          const r = 0.5 + 0.5 * Math.sin(6.283 * hue);
+          const g = 0.5 + 0.5 * Math.sin(6.283 * (hue + 0.33));
+          const b = 0.5 + 0.5 * Math.sin(6.283 * (hue + 0.66));
+          materials.ani.emissiveColor.set(r, g, b);
+        }
+
+        scene.render();
+      });
+
+      window.addEventListener("resize", () => {
+        engine.resize();
+      });
+    }
+
+    function setupMaterials() {
+      const envTex = BABYLON.CubeTexture.CreateFromPrefilteredData(
+        "https://assets.babylonjs.com/environments/environmentSpecular.env",
+        scene
+      );
+      scene.environmentTexture = envTex;
+
+      const ani = new BABYLON.PBRMaterial("ani", scene);
+      ani.metallic = 1.0;
+      ani.roughness = 0.15;
+      ani.albedoColor = new BABYLON.Color3(0.05, 0.05, 0.05);
+      ani.emissiveColor = new BABYLON.Color3(0.8, 0.3, 1.0);
+      materials.ani = ani;
+
+      const holo = new BABYLON.PBRMaterial("holo", scene);
+      holo.metallic = 0.9;
+      holo.roughness = 0.05;
+      holo.albedoColor = new BABYLON.Color3(0.1, 0.4, 0.9);
+      holo.emissiveColor = new BABYLON.Color3(0.0, 0.6, 1.2);
+      holo.alpha = 0.9;
+      materials.holo = holo;
+
+      const glass = new BABYLON.PBRMaterial("glass", scene);
+      glass.albedoColor = new BABYLON.Color3(0.9, 0.95, 1.0);
+      glass.metallic = 0.0;
+      glass.roughness = 0.0;
+      glass.alpha = 0.25;
+      glass.indexOfRefraction = 1.52;
+      glass.linkRefractionWithTransparency = true;
+      glass.transparencyMode = BABYLON.PBRMaterial.PBRMATERIAL_ALPHABLEND;
+      materials.glass = glass;
+
+      const sss = new BABYLON.PBRMaterial("sss", scene);
+      sss.albedoColor = new BABYLON.Color3(1.0, 0.78, 0.6);
+      sss.metallic = 0.1;
+      sss.roughness = 0.4;
+      sss.subSurface.isRefractionEnabled = false;
+      sss.subSurface.isTranslucencyEnabled = true;
+      sss.subSurface.translucencyIntensity = 0.9;
+      materials.sss = sss;
+
+      const iri = new BABYLON.PBRMaterial("iri", scene);
+      iri.albedoColor = new BABYLON.Color3(0.2, 0.2, 0.25);
+      iri.metallic = 1.0;
+      iri.roughness = 0.15;
+      if (iri.iridescence) {
+        iri.iridescence.isEnabled = true;
+        iri.iridescence.intensity = 1.0;
+        iri.iridescence.indexOfRefraction = 1.3;
+      }
+      materials.iri = iri;
+    }
+
+    function setMaterial(name) {
+      if (name === "original") {
+        targetMeshes.forEach(m => {
+          const original = originalMaterials.get(m);
+          if (original) m.material = original;
+        });
+        return;
+      }
+
+      const mat = materials[name];
+      if (!mat) return;
+
+      targetMeshes.forEach(m => {
+        m.material = mat;
+      });
+    }
+
+    main().catch(e => {
+      console.error("WebGPU bonus init failed:", e);
+      const label = document.getElementById("label");
+      if (label) {
+        label.textContent = "WebGPU not supported / bonus failed to init. Check browser flags.";
+      }
+    });
+  </script>
+</body>
+</html>
