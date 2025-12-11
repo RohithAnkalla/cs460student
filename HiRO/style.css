@@ -36,11 +36,13 @@ html, body {
   padding: 12px 16px;
   pointer-events: auto;
 }
+
 #ui-overlay .title {
   font-weight: 600;
   margin-bottom: 6px;
   color: #A8C5FF;
 }
+
 #ui-overlay .hint {
   margin-top: 8px;
   font-size: 12px;

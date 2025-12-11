@@ -6,6 +6,7 @@ let currentLevel = 1;
 const keys = {};
 let uiOverlay;
 let activeText = null;
+let uiHidden = false; // J hotkey: hide/show all UI
 
 // FPS overlay
 let fpsPanel = null;
@@ -15,7 +16,7 @@ let fpsSmooth = 0; // smoothed FPS value
 // Pointer lock state
 let isPointerLocked = false;
 
-// Level 1 objects
+// Level 1 objects (used and reset in level1.js)
 let level1Floor;
 let level1FloorMaterial; // shader material for WNDR-style floor/walls/roof
 let level1Walls = [];
@@ -42,18 +43,29 @@ let lastMouseX = null;
 let lastMouseY = null;
 const MOUSE_SENSITIVITY = 0.0015;
 
-// Story text for Level 1 spots
-const level1SpotTexts = [
-  "2018: Balaram Naidu is murdered.\nThat single night shatters the entire city.",
-  "After the funeral, the gang slowly breaks.\nRam leaves Guntur for BTech, alone.",
-  "By 2024, Vehaan is eaten alive by grief and politics.\nRevenge is the only thing that feels real.",
-  "Under the neem tree, a drunk argument explodes.\nVehaan pushes Shiven.\nShiven falls on a rock and dies.\nBlood stains the roots of the tree."
-];
+// ===== JUMP STATE (SPACE = jump, double-tap = long jump) =====
+let jumpVelocity = 0;
+let isOnGround = true;
+let cameraBaseHeight = 5;
+let lastJumpPressTime = 0;
+const JUMP_DOUBLE_TAP_WINDOW = 0.25; // seconds
+const JUMP_VELOCITY = 7.0;
+const LONG_JUMP_VELOCITY = 11.0;
+const GRAVITY = 20.0;
+
+// ===== SHARED RAYCAST / CROSSHAIR FOR LEVEL 2 =====
+let raycaster = null;
+let crosshairEl = null;
+let isAimMode = false; // right-click focus mode (used in Level 2)
 
 window.addEventListener("load", () => {
   uiOverlay = document.getElementById("ui-overlay");
+  if (uiOverlay) {
+    uiOverlay.style.display = "block";
+  }
   initThree();
-  initLevel1IntroText();
+  initCrosshairUI();
+  initLevel1IntroText();  // defined in levels/level1.js
   initFPSOverlay();
   animate();
 });
@@ -112,19 +124,190 @@ function initThree() {
   // Optional: orbit controls for debugging
   // controls = new THREE.OrbitControls(camera, renderer.domElement);
 
+  raycaster = new THREE.Raycaster();
+
   // Input
   window.addEventListener("resize", onWindowResize);
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("keyup", onKeyUp);
   window.addEventListener("mousemove", onMouseMove);
+  window.addEventListener("mousedown", onMouseDown);
+  window.addEventListener("contextmenu", (e) => {
+    // prevent browser context menu when right-clicking in game
+    e.preventDefault();
+  });
 
   // Start with Level 1
-  initLevel1();
+  initLevel1(); // defined in levels/level1.js
 }
 
 // ===== INPUT HANDLERS =====
 function onKeyDown(e) {
   keys[e.code] = true;
+
+  // Space = jump / long jump (gameplay, no story)
+  if (e.code === "Space") {
+    const now = performance.now() / 1000;
+    const delta = now - lastJumpPressTime;
+
+    if (isOnGround) {
+      if (delta < JUMP_DOUBLE_TAP_WINDOW) {
+        // double-tap → long jump
+        jumpVelocity = LONG_JUMP_VELOCITY;
+      } else {
+        // single-tap → normal jump
+        jumpVelocity = JUMP_VELOCITY;
+      }
+      isOnGround = false;
+    }
+
+    lastJumpPressTime = now;
+    return; // don't let Space do anything else
+  }
+
+  // Enter = story / level advance
+  if (e.code === "Enter") {
+    // ---- LEVEL 1 ENTER LOGIC ----
+    if (currentLevel === 1 && activeText && activeText.dataset.mode === "intro") {
+      // Clear intro, show controls hint
+      clearText();
+      showTextPanel(
+        "Level 1 – Broken Future",
+        "Move with WASD / Arrow keys.\nStep on glowing tiles to reveal what went wrong.",
+        "(Press ENTER after you’ve visited all tiles.)"
+      );
+      activeText.dataset.mode = "hint";
+      return;
+    }
+
+    // When player reaches center portal and sees Broken Timeline
+    if (
+      currentLevel === 1 &&
+      activeText &&
+      activeText.dataset.mode === "portal-hint"
+    ) {
+      // Go to Level 2 – Iris Wall
+      clearText();
+      if (typeof initLevel2 === "function") {
+        console.log("Switching to Level 2 – Iris Wall (via ENTER)");
+        initLevel2();
+      } else {
+        console.error("initLevel2 is not defined. Is levels/level2.js loaded correctly?");
+        showTextPanel(
+          "Level 2 Not Loaded",
+          "The Iris Wall script (levels/level2.js) is not available or has an error.\n" +
+          "Open the browser console to see more details.",
+          ""
+        );
+      }
+      return;
+    }
+
+    // ---- LEVEL 2 ENTER LOGIC ----
+    if (
+      currentLevel === 2 &&
+      activeText &&
+      activeText.dataset.mode === "iris-complete"
+    ) {
+      clearText();
+      if (typeof initLevel3 === "function") {
+        console.log("Switching to Level 3 – InsideOut House");
+        initLevel3();
+      } else {
+        showTextPanel(
+          "Level 3 Not Loaded",
+          "The InsideOut House script (levels/level3.js) is missing or has an error.",
+          "Check the browser console for details."
+        );
+      }
+      return;
+    }
+
+    // ---- LEVEL 3 ENTER LOGIC ----
+    if (
+      currentLevel === 3 &&
+      activeText &&
+      activeText.dataset.mode === "level3-intro"
+    ) {
+      // Just close the intro panel
+      clearText();
+      return;
+    }
+
+    if (
+      currentLevel === 3 &&
+      activeText &&
+      activeText.dataset.mode === "level3-complete"
+    ) {
+      // Placeholder: Level 4 will hook here later
+      clearText();
+      showTextPanel(
+        "Demo End",
+        "Level 3 complete.\nNext: Ram wakes up in 2017 Guntur (Level 4).",
+        ""
+      );
+      if (activeText) {
+        activeText.dataset.mode = "demo-end";
+      }
+      return;
+    }
+  }
+
+  // E = interact in Level 3
+  if (e.code === "KeyE") {
+    if (currentLevel === 3 && typeof handleLevel3Interact === "function") {
+      handleLevel3Interact();
+    }
+    return;
+  }
+
+  // Cheat: H = auto-complete current level & jump
+  if (e.code === "KeyH") {
+    console.log("Cheat key H pressed");
+    if (currentLevel === 1) {
+      // Skip Level 1 → Level 2
+      clearText();
+      if (typeof initLevel2 === "function") {
+        console.log("Cheat: skipping Level 1 → Level 2");
+        initLevel2();
+      } else {
+        showTextPanel(
+          "Cheat Failed",
+          "Level 2 script (levels/level2.js) is missing or has an error.",
+          "Check the browser console for details."
+        );
+      }
+    } else if (currentLevel === 2) {
+      // Skip Level 2 → Level 3
+      clearText();
+      if (typeof initLevel3 === "function") {
+        console.log("Cheat: skipping Level 2 → Level 3");
+        initLevel3();
+      } else {
+        showTextPanel(
+          "Cheat Failed",
+          "Level 3 script (levels/level3.js) is missing or has an error.",
+          "Check the browser console for details."
+        );
+      }
+    } else if (currentLevel === 3) {
+      // Auto-complete Level 3 web
+      console.log("Cheat: auto-completing Level 3");
+      if (typeof onLevel3AllConnectionsComplete === "function") {
+        onLevel3AllConnectionsComplete();
+      } else {
+        clearText();
+        showTextPanel(
+          "Demo End (Cheat)",
+          "Ram skips straight out of the InsideOut house.\n" +
+          "Next: Ram wakes up in 2017 Guntur.",
+          ""
+        );
+        if (activeText) activeText.dataset.mode = "demo-end";
+      }
+    }
+    return;
+  }
 
   // Toggle 360° look (pointer lock) with O
   if (e.code === "KeyO") {
@@ -138,41 +321,31 @@ function onKeyDown(e) {
     return; // don't let O trigger other logic
   }
 
-  // Toggle FPS panel
+  // Toggle FPS panel with P
   if (e.code === "KeyP") {
     fpsVisible = !fpsVisible;
     if (fpsPanel) {
-      fpsPanel.style.display = fpsVisible ? "block" : "none";
+      fpsPanel.style.display = (!uiHidden && fpsVisible) ? "block" : "none";
     }
     return; // so P doesn't trigger anything else
   }
 
-  // Space for skipping intro / next
-  if (e.code === "Space") {
-    if (currentLevel === 1 && activeText && activeText.dataset.mode === "intro") {
-      // Clear intro, show hint & enable movement
-      clearText();
-      showTextPanel(
-        "Level 1 – Broken Future",
-        "Move with WASD / Arrow keys.\nStep on glowing tiles to reveal what went wrong.",
-        "(Press SPACE again after you visit all tiles.)"
-      );
-      activeText.dataset.mode = "hint";
-    } else if (
-      currentLevel === 1 &&
-      level1AllSeen &&
-      activeText &&
-      activeText.dataset.mode === "level1-complete"
-    ) {
-      // Here later: move to Level 2
-      // For now, just show "Demo End"
-      clearText();
-      showTextPanel(
-        "Demo End",
-        "Level 1 complete.\nNext: we transition to Level 2 (Iris Wall).",
-        ""
-      );
+  // Toggle all UI panels (story HUD + Iris HUD + FPS) with J
+  if (e.code === "KeyJ") {
+    uiHidden = !uiHidden;
+
+    if (uiOverlay) {
+      uiOverlay.style.display = uiHidden ? "none" : "block";
     }
+
+    if (fpsPanel) {
+      fpsPanel.style.display = (!uiHidden && fpsVisible) ? "block" : "none";
+    }
+
+    // Ensure crosshair visibility follows current aim mode + UI visibility
+    setAimMode(isAimMode);
+
+    return;
   }
 }
 
@@ -210,6 +383,25 @@ function onMouseMove(e) {
   updateCameraDirection();
 }
 
+// Mouse buttons: Level 2 focus / click
+function onMouseDown(e) {
+  // Only special behavior in Level 2
+  if (currentLevel !== 2) return;
+
+  // Right button (2) → toggle aim mode (crosshair)
+  if (e.button === 2) {
+    setAimMode(!isAimMode);
+    return;
+  }
+
+  // Left button (0) → interact with iris eyes ONLY in aim mode
+  if (e.button === 0 && isAimMode) {
+    if (typeof tryInteractWithIrisEye === "function") {
+      tryInteractWithIrisEye();
+    }
+  }
+}
+
 // Update camera look direction from yaw/pitch
 function updateCameraDirection() {
   const dir = new THREE.Vector3(
@@ -239,13 +431,20 @@ function animate() {
   // if (controls) controls.update();
 
   if (currentLevel === 1) {
-    updateLevel1(dt);
+    updateLevel1(dt); // defined in levels/level1.js
 
     // animate shader floor/walls/roof
     if (level1FloorMaterial) {
       level1FloorMaterial.uniforms.u_time.value = clock.getElapsedTime();
     }
+  } else if (currentLevel === 2) {
+    updateLevel2(dt); // defined in levels/level2.js
+  } else if (currentLevel === 3) {
+    updateLevel3(dt); // defined in levels/level3.js
   }
+
+  // Apply jump/gravity to camera
+  updateJump(dt);
 
   renderer.render(scene, camera);
 }
@@ -265,22 +464,6 @@ function showTextPanel(title, body, hint = "") {
 function clearText() {
   uiOverlay.innerHTML = "";
   activeText = null;
-}
-
-// ====== LEVEL 1: LIGHT FLOOR ======
-
-// Intro story text before movement
-function initLevel1IntroText() {
-  showTextPanel(
-    "2024 – The Neem Tree",
-    "Ram touches the old neem tree and is drowned in visions:\n" +
-      "Balaram Naidu’s murder, the gang collapsing,\n" +
-      "Shiven’s death, and a broken Guntur.",
-    "Press SPACE to continue."
-  );
-  if (activeText) {
-    activeText.dataset.mode = "intro";
-  }
 }
 
 // ===== FPS OVERLAY =====
@@ -316,442 +499,71 @@ function updateFPS(dt) {
   fpsPanel.textContent = "FPS: " + fpsSmooth.toFixed(0);
 }
 
-// ===== LEVEL 1 INIT =====
-function initLevel1() {
-  // 🔥 Fluid Light Floor — WNDR-style shader
-  const floorGeo = new THREE.PlaneGeometry(60, 60);
+// ===== JUMP / GRAVITY =====
+function updateJump(dt) {
+  // simple vertical physics for camera
+  if (!isOnGround || jumpVelocity !== 0) {
+    jumpVelocity -= GRAVITY * dt;
+    camera.position.y += jumpVelocity * dt;
 
-  // initial footstep positions for uniforms (far away)
-  const footstepArray = [];
-  for (let i = 0; i < MAX_FOOTSTEPS; i++) {
-    footstepArray.push(new THREE.Vector2(9999, 9999));
+    if (camera.position.y <= cameraBaseHeight) {
+      camera.position.y = cameraBaseHeight;
+      jumpVelocity = 0;
+      isOnGround = true;
+    }
   }
+}
 
-  level1FloorMaterial = new THREE.ShaderMaterial({
-    uniforms: {
-      u_time:   { value: 0 },
-      u_color1: { value: new THREE.Color(0x020824) }, // deep blue
-      u_color2: { value: new THREE.Color(0x1b5cff) }, // bright blue
-      u_glow1:  { value: new THREE.Color(0xffd35b) }, // yellow
-      u_glow2:  { value: new THREE.Color(0xff6a3c) }, // orange
-
-      u_footsteps:     { value: footstepArray },
-      u_footstepCount: { value: 0 }
-    },
-    vertexShader: `
-      varying vec2 vUv;
-      varying vec2 vWorldXZ;
-      varying vec3 vWorldNormal;
-
-      void main() {
-        vUv = uv;
-
-        vec4 worldPos = modelMatrix * vec4(position, 1.0);
-        vWorldXZ = worldPos.xz;
-        vWorldNormal = normalize(mat3(modelMatrix) * normal);
-
-        gl_Position = projectionMatrix * viewMatrix * worldPos;
-      }
-    `,
-    fragmentShader: `
-      uniform float u_time;
-      uniform vec3 u_color1;
-      uniform vec3 u_color2;
-      uniform vec3 u_glow1;
-      uniform vec3 u_glow2;
-
-      uniform vec2 u_footsteps[${MAX_FOOTSTEPS}];
-      uniform float u_footstepCount;
-
-      varying vec2 vUv;
-      varying vec2 vWorldXZ;
-      varying vec3 vWorldNormal;
-
-      float hash(vec2 p) {
-        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
-      }
-
-      float noise(vec2 p) {
-        vec2 i = floor(p);
-        vec2 f = fract(p);
-        float a = hash(i);
-        float b = hash(i + vec2(1.0, 0.0));
-        float c = hash(i + vec2(0.0, 1.0));
-        float d = hash(i + vec2(1.0, 1.0));
-        vec2 u = f * f * (3.0 - 2.0 * f);
-        return mix(a, b, u.x) +
-               (c - a) * u.y * (1.0 - u.x) +
-               (d - b) * u.x * u.y;
-      }
-
-      void main() {
-        vec2 p = vUv * 10.0;
-        float t = u_time * 0.3;
-
-        float n1 = noise(p + vec2(t, -t));
-        float n2 = noise(p * 1.7 - vec2(t * 0.7, t * 0.4));
-        float n3 = noise(p * 3.5 + vec2(-t * 0.2, t * 0.9));
-
-        float base = n1 * 0.55 + n2 * 0.35 + n3 * 0.10;
-        vec3 col = mix(u_color1, u_color2, base);
-
-        // FOOTSTEP GLOW (only on mostly horizontal surfaces)
-        float footGlow = 0.0;
-
-        if (abs(vWorldNormal.y) > 0.5) {
-          const int MAX_STEPS = ${MAX_FOOTSTEPS};
-          for (int i = 0; i < MAX_STEPS; i++) {
-            if (float(i) >= u_footstepCount) break;
-            vec2 stepPos = u_footsteps[i];
-            float d = length(vWorldXZ - stepPos);
-
-            float radius = 2.2;                     // footprint influence radius
-            float f = smoothstep(radius, 0.0, d);   // 1 at center -> 0 at radius
-
-            footGlow = max(footGlow, f);
-          }
-        }
-
-        // One global noise sample to break the trail into splashy blobs
-        if (footGlow > 0.0) {
-          float detail = noise(vWorldXZ * 8.0);
-          float mask   = smoothstep(0.35, 1.0, detail); // adjust density
-          float splash = footGlow * mask;
-
-          col = mix(col, u_glow1, splash * 0.9);
-          col = mix(col, u_glow2, splash * 0.7);
-        }
-
-        gl_FragColor = vec4(col, 1.0);
-      }
-    `,
-    side: THREE.DoubleSide
+// ===== CROSSHAIR UI (for Level 2 focus mode) =====
+function initCrosshairUI() {
+  crosshairEl = document.createElement("div");
+  Object.assign(crosshairEl.style, {
+    position: "fixed",
+    left: "50%",
+    top: "50%",
+    width: "14px",
+    height: "14px",
+    marginLeft: "-7px",
+    marginTop: "-7px",
+    borderRadius: "50%",
+    border: "2px solid rgba(200, 230, 255, 0.9)",
+    boxSizing: "border-box",
+    pointerEvents: "none",
+    zIndex: "999",
+    display: "none", // hidden by default
+    backdropFilter: "blur(2px)"
   });
 
-  level1Floor = new THREE.Mesh(floorGeo, level1FloorMaterial);
-  level1Floor.rotation.x = -Math.PI / 2;
-  scene.add(level1Floor);
-
-  // "Mirror" walls + roof using same animated material
-  level1Walls.forEach(w => scene.remove(w));
-  level1Walls = [];
-
-  const wallGeo = new THREE.PlaneGeometry(60, 10);
-
-  const makeWall = (position, rotationY) => {
-    const wall = new THREE.Mesh(wallGeo, level1FloorMaterial);
-    wall.position.copy(position);
-    wall.rotation.y = rotationY;
-    scene.add(wall);
-    level1Walls.push(wall);
-  };
-
-  // z- (north), z+ (south), x- (west), x+ (east)
-  makeWall(new THREE.Vector3(0, 5, -30), 0);             // front
-  makeWall(new THREE.Vector3(0, 5,  30), Math.PI);       // back
-  makeWall(new THREE.Vector3(-30, 5, 0), Math.PI / 2);   // left
-  makeWall(new THREE.Vector3( 30, 5, 0), -Math.PI / 2);  // right
-
-  // Roof "mirror"
-  const roof = new THREE.Mesh(floorGeo, level1FloorMaterial);
-  roof.position.set(0, 10, 0);
-  roof.rotation.x = Math.PI / 2; // face down
-  scene.add(roof);
-  level1Walls.push(roof);
-
-  // 🔥 Glowing memory spots — *very thin* rings, spread over room randomly
-  level1Spots.forEach(s => scene.remove(s));
-  level1Spots = [];
-
-  const spotCount = 4;        // 4 memories
-  const usedPositions = [];
-  const bounds = 24;
-  const minDist = 10.0;       // keep rings away from each other
-  const minCenterDist = 10.0; // not too close to portal at (0,0)
-
-  function randomSpotPosition() {
-    for (let attempt = 0; attempt < 80; attempt++) {
-      const x = (Math.random() * 2 - 1) * bounds;
-      const z = (Math.random() * 2 - 1) * bounds;
-      const candidate = new THREE.Vector3(x, 0.01, z);
-
-      // keep some distance from center portal
-      if (candidate.length() < minCenterDist) continue;
-
-      let ok = true;
-      for (const p of usedPositions) {
-        if (p.distanceTo(candidate) < minDist) {
-          ok = false;
-          break;
-        }
-      }
-      if (ok) {
-        usedPositions.push(candidate);
-        return candidate;
-      }
-    }
-    // fallback (should rarely happen)
-    return new THREE.Vector3(
-      (Math.random() * 2 - 1) * bounds,
-      0.01,
-      (Math.random() * 2 - 1) * bounds
-    );
-  }
-
-  for (let i = 0; i < spotCount; i++) {
-    const pos = randomSpotPosition();
-
-    // VERY thin ring
-    const ringGeo = new THREE.RingGeometry(1.15, 1.25, 64);
-    const ringMat = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      emissive: 0xffffff,
-      emissiveIntensity: 2.4,   // bright glow
-      roughness: 0.05,
-      metalness: 0.9,
-      transparent: true,
-      opacity: 0.95,
-      side: THREE.DoubleSide
+  // small plus inside the circle (pure CSS)
+  const horizontal = document.createElement("div");
+  const vertical = document.createElement("div");
+  [horizontal, vertical].forEach(line => {
+    Object.assign(line.style, {
+      position: "absolute",
+      left: "50%",
+      top: "50%",
+      background: "rgba(200, 230, 255, 0.9)",
+      transform: "translate(-50%, -50%)"
     });
-    const spot = new THREE.Mesh(ringGeo, ringMat);
-    spot.position.copy(pos);
-    spot.rotation.x = -Math.PI / 2;
-    spot.userData = {
-      index: i,
-      activated: false
-    };
-    level1Spots.push(spot);
-    scene.add(spot);
-  }
-
-  // Center portal (initially hidden & dim)
-  const portalGeo = new THREE.CircleGeometry(2, 40);
-  const portalMat = new THREE.MeshStandardMaterial({
-    color: 0x00ffcc,
-    emissive: 0x001111,
-    emissiveIntensity: 0.0,
-    transparent: true,
-    opacity: 0.6,
-    roughness: 0.2,
-    metalness: 0.8
   });
-  level1CenterPortal = new THREE.Mesh(portalGeo, portalMat);
-  level1CenterPortal.position.set(0, 0.011, 0);
-  level1CenterPortal.rotation.x = -Math.PI / 2;
-  scene.add(level1CenterPortal);
-  level1CenterPortal.visible = false; // hide initially
+  horizontal.style.width = "8px";
+  horizontal.style.height = "1px";
+  vertical.style.width = "1px";
+  vertical.style.height = "8px";
 
-  level1ActivatedCount = 0;
-  level1AllSeen = false;
-
-  // Place camera
-  camera.position.set(0, 5, 12);
-  yaw = 0;
-  pitch = 0;
-  updateCameraDirection();
-
-  // Reset footsteps
-  footstepList = [];
-  lastFootstepPos = camera.position.clone();
-  updateFootsteps();
+  crosshairEl.appendChild(horizontal);
+  crosshairEl.appendChild(vertical);
+  document.body.appendChild(crosshairEl);
 }
 
-function updateLevel1(dt) {
-  handleCameraMovement(dt);
-  pulseSpots(dt);
-  updateFootsteps();   // update shader footprints
-  checkSpotTriggers();
-  checkCenterPortal();
-}
+function setAimMode(enabled) {
+  isAimMode = enabled;
+  if (!crosshairEl) return;
 
-// WASD movement relative to where the camera is looking
-function handleCameraMovement(dt) {
-  const forwardKey  = (keys["KeyW"] || keys["ArrowUp"]) ? 1 : 0;
-  const backwardKey = (keys["KeyS"] || keys["ArrowDown"]) ? 1 : 0;
-  const leftKey     = (keys["KeyA"] || keys["ArrowLeft"]) ? 1 : 0;
-  const rightKey    = (keys["KeyD"] || keys["ArrowRight"]) ? 1 : 0;
-
-  const moveZ = forwardKey - backwardKey; // +forward, -back
-  const moveX = rightKey - leftKey;       // +right, -left
-
-  if (moveZ === 0 && moveX === 0) return;
-
-  // camera forward direction on XZ plane
-  const dir = new THREE.Vector3(
-    Math.sin(yaw),
-    0,
-    -Math.cos(yaw)
-  ).normalize();
-
-  // right vector (no negate) so D => right, A => left
-  const right = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize();
-
-  const moveVec = new THREE.Vector3();
-  moveVec.addScaledVector(dir, moveZ);
-  moveVec.addScaledVector(right, moveX);
-
-  if (moveVec.lengthSq() > 0) {
-    // Shift = sprint
-    const isSprinting = keys["ShiftLeft"] || keys["ShiftRight"];
-    const speed = MOVE_SPEED * (isSprinting ? SPRINT_MULTIPLIER : 1);
-
-    moveVec.normalize().multiplyScalar(speed * dt);
-    camera.position.add(moveVec);
-    updateCameraDirection();
-
-    // --- FOOTSTEPS (shader-based) ---
-    if (!lastFootstepPos) {
-      lastFootstepPos = camera.position.clone();
-    } else {
-      const dx = camera.position.x - lastFootstepPos.x;
-      const dz = camera.position.z - lastFootstepPos.z;
-      const distMoved = Math.sqrt(dx * dx + dz * dz);
-      if (distMoved > FOOTSTEP_STEP_DIST) {
-        addFootstepFromPosition(camera.position);
-        lastFootstepPos.copy(camera.position);
-      }
-    }
-    // ---------------------------------
-  }
-
-  // keep camera roughly inside the mirrored room
-  const limit = 26;
-  camera.position.x = THREE.MathUtils.clamp(camera.position.x, -limit, limit);
-  camera.position.z = THREE.MathUtils.clamp(camera.position.z, -limit, limit);
-}
-
-// Add a new footstep sample
-function addFootstepFromPosition(pos) {
-  const now = clock.getElapsedTime();
-
-  // small random offset so the path is not a perfect straight line
-  const jitterAmount = 0.7; // tweak if needed
-  const jx = (Math.random() - 0.5) * jitterAmount;
-  const jz = (Math.random() - 0.5) * jitterAmount;
-
-  footstepList.push({ x: pos.x + jx, z: pos.z + jz, time: now });
-
-  if (footstepList.length > MAX_FOOTSTEPS) {
-    footstepList.shift();
-  }
-  updateFootsteps();
-}
-
-// Update footstep uniforms (called every frame)
-function updateFootsteps() {
-  if (!level1FloorMaterial) return;
-
-  const now = clock.getElapsedTime();
-
-  // remove old footsteps
-  for (let i = footstepList.length - 1; i >= 0; i--) {
-    if (now - footstepList[i].time > FOOTSTEP_LIFETIME) {
-      footstepList.splice(i, 1);
-    }
-  }
-
-  const uSteps = level1FloorMaterial.uniforms.u_footsteps.value;
-  const count = footstepList.length;
-
-  for (let i = 0; i < MAX_FOOTSTEPS; i++) {
-    if (i < count) {
-      uSteps[i].set(footstepList[i].x, footstepList[i].z);
-    } else {
-      uSteps[i].set(9999, 9999); // far away => no effect
-    }
-  }
-
-  level1FloorMaterial.uniforms.u_footstepCount.value = count;
-}
-
-// Make spots gently pulse
-function pulseSpots(dt) {
-  const t = performance.now() * 0.001;
-  level1Spots.forEach((spot) => {
-    const mat = spot.material;
-    const pulse = 2.0 + Math.sin(t * 3.0 + spot.userData.index) * 0.7;
-    if (!spot.userData.activated) {
-      mat.emissiveIntensity = pulse;
-      mat.opacity = 0.9 + Math.sin(t * 2.0 + spot.userData.index) * 0.08;
-    } else {
-      mat.emissiveIntensity = 0.7; // dim after seen
-      mat.opacity = 0.5;
-    }
-  });
-
-  if (level1AllSeen && level1CenterPortal) {
-    const mat = level1CenterPortal.material;
-    mat.emissiveIntensity = 0.8 + Math.sin(t * 3.0) * 0.3;
-  }
-}
-
-// When camera steps on a spot, show its memory text
-function checkSpotTriggers() {
-  const camPos = camera.position;
-  const cam2D = new THREE.Vector2(camPos.x, camPos.z); // ground projection
-
-  level1Spots.forEach((spot) => {
-    if (spot.userData.activated) return;
-
-    const spot2D = new THREE.Vector2(spot.position.x, spot.position.z);
-    const dist = cam2D.distanceTo(spot2D);
-
-    if (dist < 1.5) {
-      spot.userData.activated = true;
-      level1ActivatedCount++;
-
-      const idx = spot.userData.index;
-      clearText();
-      showTextPanel(
-        "Future Memory " + (idx + 1),
-        level1SpotTexts[idx],
-        "Move to the other glowing rings to see the rest."
-      );
-
-      if (level1ActivatedCount === level1Spots.length) {
-        level1AllSeen = true;
-        level1CenterPortal.visible = true;
-        const mat = level1CenterPortal.material;
-        mat.emissiveIntensity = 0.4;
-        mat.color.set(0x00ffee);
-
-        clearText();
-        showTextPanel(
-          "Broken Timeline",
-          "Ram now understands the shape of his failure:\n" +
-            "Balaram Naidu’s death in 2018 shattered everything.\n" +
-            "If he wants to save Shiven, Vehaan, and Guntur,\n" +
-            "he must somehow prevent that murder.",
-          "Walk to the glowing circle in the center.\nThen press SPACE when it feels right."
-        );
-        if (activeText) {
-          activeText.dataset.mode = "portal-hint"; // not complete yet
-        }
-      }
-    }
-  });
-}
-
-// When Ram reaches center portal (after all memories), show vow text
-function checkCenterPortal() {
-  if (!level1AllSeen || !level1CenterPortal) return;
-
-  const camPos = camera.position;
-  const dist = camPos.distanceTo(level1CenterPortal.position);
-
-  if (dist < 2.0) {
-    if (!activeText || activeText.dataset.mode !== "level1-complete") {
-      clearText();
-      showTextPanel(
-        "Decision Point",
-        "Standing at the center of his broken future,\n" +
-          "Ram makes a silent vow:\n" +
-          "he will go back to 2017 and stop Balaram Naidu’s murder.",
-        "Press SPACE to continue."
-      );
-      if (activeText) {
-        activeText.dataset.mode = "level1-complete";
-      }
-    }
+  // Only show crosshair in Level 2, when UI is not hidden
+  if (currentLevel === 2 && enabled && !uiHidden) {
+    crosshairEl.style.display = "block";
+  } else {
+    crosshairEl.style.display = "none";
   }
 }
